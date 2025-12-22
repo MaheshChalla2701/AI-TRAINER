@@ -4,7 +4,7 @@ import {
     Text,
     View,
     TouchableOpacity,
-    Dimensions,
+    useWindowDimensions,
     Alert
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
@@ -13,7 +13,7 @@ import PoseOverlay from '../components/PoseOverlay';
 import FormFeedbackOverlay from '../components/FormFeedbackOverlay';
 import ExerciseSelector from '../components/ExerciseSelector';
 import CountdownOverlay from '../components/CountdownOverlay';
-import HandOverlay from '../components/HandOverlay';
+
 import AppConfig from '../config/appConfig';
 import { Pose, FormValidation } from '../types';
 import { getExerciseById } from '../models/exercises';
@@ -23,7 +23,7 @@ import { avatarService } from '../services/AvatarService';
 import { useAppDispatch } from '../hooks/reduxHooks';
 import { saveWorkout } from '../store/slices/workoutSlice';
 import { useSmartCamera } from '../hooks/useSmartCamera';
-import GestureFeedback from '../components/GestureFeedback';
+
 
 interface CameraScreenProps {
     navigation: {
@@ -75,7 +75,7 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
     const [formScoreCount, setFormScoreCount] = useState(0);
     const prevRepCount = useRef(0);
 
-    const { width, height } = Dimensions.get('window');
+    const { width, height } = useWindowDimensions();
 
     // Initialize pose detection logic removed (handled by hook)
 
@@ -160,25 +160,24 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
      */
     const {
         poses: rawPoses,
-        gesture,
-        gestureConfidence,
-        handLandmarks,
         isDetecting: isVisionActive
     } = useSmartCamera(
         AppConfig.features.enablePoseDetection,
         cameraRef
     );
 
-    // Scale normalized poses to screen dimensions OR use mock poses
+    // Scale normalized poses to screen dimensions for DISPLAY
+    // Scale normalized poses to screen dimensions for DISPLAY
     const poses = React.useMemo(() => {
         // Priority to real poses
         if (rawPoses && rawPoses.length > 0) {
+            const isMirrored = facing === 'front';
             return rawPoses.map(pose => ({
                 ...pose,
                 keypoints: pose.keypoints.map(kp => ({
                     ...kp,
-                    // Flip x back to match mirrored camera feed
-                    x: (1 - kp.x) * width,
+                    // Mirroring logic
+                    x: isMirrored ? (1 - kp.x) * width : kp.x * width,
                     y: kp.y * height
                 }))
             }));
@@ -190,7 +189,23 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
         }
 
         return [];
-    }, [rawPoses, mockPoses, width, height]);
+    }, [rawPoses, mockPoses, width, height, facing]);
+
+    // Points for ACCURATE ANALYSIS (using screen aspect ratio to preserve angles)
+    const analysisPoses = React.useMemo(() => {
+        if (rawPoses && rawPoses.length > 0) {
+            return rawPoses.map(pose => ({
+                ...pose,
+                keypoints: pose.keypoints.map(kp => ({
+                    ...kp,
+                    // Use screen dimensions to preserve correct physical angles
+                    x: kp.x * width,
+                    y: kp.y * height
+                }))
+            }));
+        }
+        return [];
+    }, [rawPoses, width, height]);
 
     const isPoseModelReady = true; // Always considered ready with backend approach
 
@@ -221,13 +236,13 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
      * Handle pose updates and analyze workout
      */
     useEffect(() => {
-        if (!isWorkoutActive || poses.length === 0) return;
+        if (!isWorkoutActive || analysisPoses.length === 0) return;
 
         const exercise = getExerciseById(exerciseId);
         if (!exercise) return;
 
-        // Pass the first scaled pose
-        const result = workoutAnalysisService.analyze(poses[0], exercise);
+        // Pass the first scaled pose for ANALYSIS (un-distorted)
+        const result = workoutAnalysisService.analyze(analysisPoses[0], exercise);
         setCurrentStage(result.stage);
         setRepCount(result.reps);
         setFormScore(result.validation.score);
@@ -247,22 +262,7 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
         }
     }, [poses, isWorkoutActive, exerciseId]);
 
-    /**
-     * Hand Gesture Control Logic
-     */
-    // const { gesture, confidence: gestureConfidence } = useGestureDetection(true, cameraRef); // Replaced by SmartCamera
 
-    useEffect(() => {
-        if (!gesture || gestureConfidence < 0.8) return;
-
-        if (gesture.name === 'Thumbs Up' && !isWorkoutActive && !showCountdown) {
-            console.log('[Gesture] Thumbs Up detected - Starting workout');
-            toggleWorkout();
-        } else if (gesture.name === 'Fist' && isWorkoutActive) {
-            console.log('[Gesture] Fist detected - Stopping workout');
-            toggleWorkout();
-        }
-    }, [gesture, gestureConfidence, isWorkoutActive, showCountdown]);
 
     /**
      * Toggle workout session
@@ -435,12 +435,7 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
                     />
                 )}
 
-                {/* Hand Visuals */}
-                <HandOverlay
-                    landmarks={handLandmarks.map(lm => ({ ...lm, x: 1 - lm.x }))}
-                    width={width}
-                    height={height}
-                />
+
 
                 {/* Form Feedback Overlay */}
                 <FormFeedbackOverlay
@@ -450,11 +445,7 @@ export default function CameraScreen({ navigation }: CameraScreenProps) {
                 />
 
                 {/* Gesture Feedback Overlay */}
-                <GestureFeedback
-                    gesture={gesture}
-                    confidence={gestureConfidence}
-                    visible={true}
-                />
+
                 {/* HUD - Exercise Info */}
                 {isWorkoutActive && (
                     <View style={styles.hud}>

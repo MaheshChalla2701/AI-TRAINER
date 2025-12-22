@@ -1,15 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { CameraView } from 'expo-camera';
 import { poseDetectionService } from '../services/PoseDetectionService';
-import { gestureDetectionService } from '../services/GestureDetectionService';
-import { Pose, GestureType, HandLandmark } from '../types';
+import { Pose } from '../types';
 import AppConfig from '../config/appConfig';
 
 interface SmartCameraResult {
     poses: Pose[];
-    gesture: GestureType | null;
-    gestureConfidence: number;
-    handLandmarks: HandLandmark[];
     isDetecting: boolean;
 }
 
@@ -19,14 +15,12 @@ export const useSmartCamera = (
 ): SmartCameraResult => {
     // State
     const [poses, setPoses] = useState<Pose[]>([]);
-    const [gesture, setGesture] = useState<GestureType | null>(null);
-    const [gestureConfidence, setGestureConfidence] = useState<number>(0);
-    const [handLandmarks, setHandLandmarks] = useState<HandLandmark[]>([]);
     const [isDetecting, setIsDetecting] = useState(false);
 
     // Refs for loop control (avoid state updates during capture)
     const isProcessingRef = useRef(false);
     const loopTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const missedFramesRef = useRef(0);
 
     const runDetectionLoop = useCallback(async () => {
         // If conditions not met, reschedule and try again later
@@ -50,40 +44,31 @@ export const useSmartCamera = (
             if (photo && photo.base64) {
                 const base64 = photo.base64;
 
-                // 2. Parallel Processing
-                // Send frame to both backends simultaneously
-                const posePromise = AppConfig.features.enablePoseDetection
-                    ? poseDetectionService.detectPose(base64)
-                    : Promise.resolve([]);
-
-                const gesturePromise = AppConfig.features.enablePoseDetection // Recycle this flag or add a new one? Use gesture flag if exists, implied true for now.
-                    ? gestureDetectionService.detectGesture(base64)
-                    : Promise.resolve(null);
-
-                const [detectedPoses, gestureResult] = await Promise.all([posePromise, gesturePromise]);
+                // 2. Process Pose
+                const detectedPoses = AppConfig.features.enablePoseDetection
+                    ? await poseDetectionService.detectPose(base64)
+                    : [];
 
                 // 3. Update State
-                if (detectedPoses) {
+                if (detectedPoses && detectedPoses.length > 0) {
                     setPoses(detectedPoses);
-                }
-
-                if (gestureResult) {
-                    setGesture(gestureResult.gesture);
-                    setGestureConfidence(gestureResult.confidence);
-                    setHandLandmarks(gestureResult.landmarks || []);
+                    missedFramesRef.current = 0;
                 } else {
-                    setGesture(null);
-                    setGestureConfidence(0);
-                    setHandLandmarks([]);
+                    missedFramesRef.current += 1;
+                    if (missedFramesRef.current > 10) {
+                        setPoses([]);
+                    }
                 }
             }
         } catch (err) {
-            // console.warn('[SmartCamera] Loop Error:', err);
+            console.warn('[SmartCamera] Detection error:', err);
+            // Don't clear poses on transient errors to prevent blinking
+            // Just keep the last known good pose until next successful frame
         } finally {
             isProcessingRef.current = false;
-            // Schedule next frame
+            // Schedule next frame - faster loop for smoother tracking
             if (isActive) {
-                loopTimerRef.current = setTimeout(runDetectionLoop, 100); // Aim for ~10fps
+                loopTimerRef.current = setTimeout(runDetectionLoop, 50); // ~20fps target
             }
         }
     }, [isActive, cameraRef]);
@@ -91,11 +76,8 @@ export const useSmartCamera = (
     useEffect(() => {
         if (isActive) {
             setIsDetecting(true);
-            // Initialize both services
-            Promise.all([
-                poseDetectionService.initialize(),
-                // gesture service needs no init or reuse logic
-            ]).then(() => {
+            // Initialize service
+            poseDetectionService.initialize().then(() => {
                 runDetectionLoop();
             });
         } else {
@@ -104,7 +86,6 @@ export const useSmartCamera = (
                 clearTimeout(loopTimerRef.current);
             }
             setPoses([]);
-            setGesture(null);
         }
 
         return () => {
@@ -116,9 +97,6 @@ export const useSmartCamera = (
 
     return {
         poses,
-        gesture,
-        gestureConfidence,
-        handLandmarks,
         isDetecting
     };
 };

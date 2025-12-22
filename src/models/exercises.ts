@@ -18,15 +18,15 @@ export const exercises: Exercise[] = [
                 angleRanges: [
                     {
                         joint: 'left_elbow',
-                        min: 70,
-                        max: 100,
-                        optimal: 90
+                        min: 60,
+                        max: 90,
+                        optimal: 75
                     },
                     {
                         joint: 'right_elbow',
-                        min: 70,
-                        max: 100,
-                        optimal: 90
+                        min: 60,
+                        max: 90,
+                        optimal: 75
                     }
                 ]
             },
@@ -87,15 +87,15 @@ export const exercises: Exercise[] = [
                 angleRanges: [
                     {
                         joint: 'left_knee',
-                        min: 70,
-                        max: 100,
-                        optimal: 90
+                        min: 60,
+                        max: 90,
+                        optimal: 80
                     },
                     {
                         joint: 'right_knee',
-                        min: 70,
-                        max: 100,
-                        optimal: 90
+                        min: 60,
+                        max: 90,
+                        optimal: 80
                     }
                 ]
             },

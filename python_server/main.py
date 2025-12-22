@@ -6,6 +6,8 @@ from flask_cors import CORS
 import base64
 import time
 import math
+import io
+from PIL import Image, ImageOps
 
 app = Flask(__name__)
 CORS(app)
@@ -15,29 +17,28 @@ mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 pose = mp_pose.Pose(
     static_image_mode=False,
-    model_complexity=1, 
+    model_complexity=2, # Highest accuracy
     smooth_landmarks=True,
     enable_segmentation=False,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
 
-# Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=False,
-    max_num_hands=1,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
+
 
 def decode_image(base64_string):
     if ',' in base64_string:
         base64_string = base64_string.split(',')[1]
     
     img_data = base64.b64decode(base64_string)
-    nparr = np.frombuffer(img_data, np.uint8)
-    return cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    # Use PIL to handle EXIF orientation (sideways photos from phones)
+    img = Image.open(io.BytesIO(img_data))
+    img = ImageOps.exif_transpose(img) 
+    
+    # Convert back to CV2 (BGR)
+    img_cv2 = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    return img_cv2
 
 # --- Utility: Angle Calculation (OpenCV/Numpy style) ---
 def calculate_angle(p1, p2, p3):
@@ -55,44 +56,7 @@ def calculate_angle(p1, p2, p3):
         
     return angle
 
-# --- Hand Gesture Helpers ---
-def get_distance(p1, p2):
-    return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2)**0.5
 
-def get_finger_states(landmarks):
-    fingers = []
-    wrist = landmarks[mp_hands.HandLandmark.WRIST]
-    thumb_tip = landmarks[mp_hands.HandLandmark.THUMB_TIP]
-    thumb_ip = landmarks[mp_hands.HandLandmark.THUMB_IP]
-    index_mcp = landmarks[mp_hands.HandLandmark.INDEX_FINGER_MCP]
-    
-    if get_distance(thumb_tip, index_mcp) > get_distance(thumb_ip, index_mcp):
-        fingers.append(True)
-    else:
-        fingers.append(False)
-            
-    finger_tips = [mp_hands.HandLandmark.INDEX_FINGER_TIP, mp_hands.HandLandmark.MIDDLE_FINGER_TIP, 
-                   mp_hands.HandLandmark.RING_FINGER_TIP, mp_hands.HandLandmark.PINKY_TIP]
-    finger_pips = [mp_hands.HandLandmark.INDEX_FINGER_PIP, mp_hands.HandLandmark.MIDDLE_FINGER_PIP, 
-                   mp_hands.HandLandmark.RING_FINGER_PIP, mp_hands.HandLandmark.PINKY_PIP]
-    
-    for tip, pip in zip(finger_tips, finger_pips):
-        if get_distance(landmarks[tip], wrist) > get_distance(landmarks[pip], wrist):
-            fingers.append(True)
-        else:
-            fingers.append(False)
-    return fingers
-
-def get_gesture(landmarks):
-    fingers = get_finger_states(landmarks)
-    if not any(fingers): return {"name": "Fist", "emoji": "✊", "score": 0.9}
-    if all(fingers): return {"name": "Open Palm", "emoji": "🖐️", "score": 0.95}
-    if fingers[0] and not any(fingers[1:]): return {"name": "Thumbs Up", "emoji": "👍", "score": 0.9}
-    if fingers[1] and fingers[2] and not fingers[3] and not fingers[4]: return {"name": "Victory", "emoji": "✌️", "score": 0.9}
-    if fingers[1] and not any(fingers[2:]): return {"name": "Pointing", "emoji": "☝️", "score": 0.9}
-    if fingers[1] and fingers[4] and not fingers[2] and not fingers[3]: return {"name": "Rock On", "emoji": "🤘", "score": 0.85}
-    if sum(fingers) == 3: return {"name": "Three Fingers", "emoji": "🤟", "score": 0.7}
-    return {"name": "Hand Detected", "emoji": "🖐️", "score": 0.6}
 
 # --- Endpoints ---
 
@@ -104,18 +68,28 @@ def detect_pose():
             return jsonify({"error": "No image data"}), 400
 
         img = decode_image(data['image'])
-        # --- OpenCV Optimizations ---
-        img = cv2.flip(img, 1) # Mirror for front camera
-        img = cv2.resize(img, (640, 480)) # Consistent resolution
         
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Consistent resizing to 640x640 with padding (square for MediaPipe)
+        h, w = img.shape[:2]
+        target_size = 640
+        scale = target_size / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
         
+        img_resized = cv2.resize(img, (new_w, new_h))
+        img_padded = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+        
+        x_offset = (target_size - new_w) // 2
+        y_offset = (target_size - new_h) // 2
+        img_padded[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = img_resized
+        
+        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
         results = pose.process(img_rgb)
         
         response_data = {
             "keypoints": [],
             "angles": {},
-            "score": 0
+            "score": 0,
+            "processed_dims": {"w": w, "h": h} # Tell frontend original aspect
         }
 
         if results.pose_landmarks:
@@ -145,8 +119,14 @@ def detect_pose():
 
             for idx, lm in enumerate(landmarks):
                 name = mp_names.get(idx, f"point_{idx}")
+                
+                # Correct coordinates back to original image aspect ratio (remove padding)
+                # lm.x/lm.y are [0,1] in 640x640 space
+                corrected_x = (lm.x * target_size - x_offset) / new_w
+                corrected_y = (lm.y * target_size - y_offset) / new_h
+                
                 keypoints.append({
-                    "x": lm.x, "y": lm.y, "z": lm.z,
+                    "x": corrected_x, "y": corrected_y, "z": lm.z,
                     "score": lm.visibility, "name": name
                 })
             
@@ -173,40 +153,7 @@ def detect_pose():
         print(f"Error in pose: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/detect', methods=['POST'])
-def detect_gesture():
-    try:
-        data = request.json
-        if not data or 'image' not in data:
-            return jsonify({"error": "No image data"}), 400
 
-        img = decode_image(data['image'])
-        # --- OpenCV Optimizations ---
-        img = cv2.flip(img, 1)
-        img = cv2.resize(img, (640, 480))
-        
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = hands.process(img_rgb)
-
-        detection_result = {
-            "gesture": {"name": "None", "emoji": "❓"},
-            "confidence": 0,
-            "landmarks": []
-        }
-
-        if results.multi_hand_landmarks:
-            hand_landmarks = results.multi_hand_landmarks[0]
-            processed_landmarks = [{"x": lm.x, "y": lm.y, "z": lm.z} for lm in hand_landmarks.landmark]
-            gesture = get_gesture(hand_landmarks.landmark)
-            detection_result = {
-                "gesture": {"name": gesture["name"], "emoji": gesture["emoji"]},
-                "confidence": gesture["score"],
-                "landmarks": processed_landmarks
-            }
-        return jsonify(detection_result)
-    except Exception as e:
-        print(f"Error in gesture: {e}")
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():

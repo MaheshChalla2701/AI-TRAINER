@@ -66,7 +66,9 @@ class RepCounter {
   constructor(exerciseId: string) {
     this.exerciseId = exerciseId;
   }
-  update(currentStage: string) {
+  update(currentStage: string, isFormValid: boolean) {
+    if (!isFormValid) return this.reps; // Only count if form is good
+
     const prev = this.lastStage;
     this.lastStage = currentStage;
     if (this.exerciseId === 'push-ups') {
@@ -92,25 +94,26 @@ class WorkoutAnalysisService {
   }
   analyze(pose: Pose, exercise: Exercise) {
     const stage = bestMatchingStage(pose, exercise);
-    const reps = this.getCounter(exercise.id).update(stage);
+
+    // 1. Initial form check
     const validation: FormValidation = {
       isValid: true,
       score: 100,
       errors: [],
     };
-    for (const check of exercise.formChecks) {
-      const ok = true;
-      if (!ok) {
-        validation.isValid = false;
-        validation.score -= 10;
-        validation.errors.push({
-          severity: check.severity,
-          message: check.description,
-          visualCue: check.feedback.visual,
-          audioCue: check.feedback.audio,
-        });
-      }
+
+    // TODO: Implement actual form checks from exercise.formChecks
+    // For now, we assume form is valid if the key joints are detected with high confidence
+    const confidenceThreshold = 0.5;
+    const keyJoints = pose.keypoints.filter(kp => (kp.score || 0) > confidenceThreshold);
+    if (keyJoints.length < 5) {
+      validation.isValid = false;
+      validation.score = 30;
     }
+
+    // 2. Update reps ONLY if form is valid (or sufficiently good)
+    const reps = this.getCounter(exercise.id).update(stage, validation.isValid);
+
     return { stage, reps, validation };
   }
   reset(exerciseId: string) {
